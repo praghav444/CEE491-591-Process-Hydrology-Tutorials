@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+scipy
+scikit-learn
+statsmodels
+torch
+pystac-client
+rasterio
+jupyter
