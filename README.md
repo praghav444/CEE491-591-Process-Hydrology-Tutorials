@@ -32,6 +32,7 @@ the notebooks download them automatically when run on Colab.
 | [Gap-filling flux data with machine learning](tutorials/geo_ai/10_Gap_Filling_Flux_Data_with_Machine_Learning.ipynb) | Artificial short and long gaps, MDS-style lookup versus random forest, effect on annual ET | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/praghav444/CEE491-591-Process-Hydrology-Tutorials/blob/main/tutorials/geo_ai/10_Gap_Filling_Flux_Data_with_Machine_Learning.ipynb) |
 | [Satellite data with STAC: Sentinel-2 NDVI](tutorials/geo_ai/11_Satellite_Data_with_STAC_Sentinel2_NDVI.ipynb) | Search a STAC catalog, read windows from cloud-optimized GeoTIFFs, NDVI time series versus tower LAI | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/praghav444/CEE491-591-Process-Hydrology-Tutorials/blob/main/tutorials/geo_ai/11_Satellite_Data_with_STAC_Sentinel2_NDVI.ipynb) |
 | [Geo foundation models for ET and GPP: AlphaEarth embeddings](tutorials/geo_ai/12_Geo_Foundation_Models_AlphaEarth_ET_GPP.ipynb) | What an embedding is, analog towers and linear probes, traditional versus embedding-based flux models at 200+ towers with leave-site-out validation and learning curves, monthly ET and GPP maps at 100 m around Vaira Ranch against OpenET, MOD16, MOD17 and the withheld towers, change detection | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/praghav444/CEE491-591-Process-Hydrology-Tutorials/blob/main/tutorials/geo_ai/12_Geo_Foundation_Models_AlphaEarth_ET_GPP.ipynb) |
+| [Monthly embeddings from Prithvi-EO versus AlphaEarth's annual vector](tutorials/geo_ai/13_Monthly_Embeddings_Prithvi_vs_AlphaEarth.ipynb) | Run a second foundation model (Prithvi-EO-2.0 on monthly HLS imagery), separate the effect of the model from the effect of temporal resolution, decompose skill into between-site and within-year parts, maps at 480 m | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/praghav444/CEE491-591-Process-Hydrology-Tutorials/blob/main/tutorials/geo_ai/13_Monthly_Embeddings_Prithvi_vs_AlphaEarth.ipynb) |
 
 ## Running locally
 
@@ -44,7 +45,7 @@ jupyter lab
 
 All tutorials except the two below need only `numpy`, `pandas`, `matplotlib`, `scipy`, `scikit-learn`, and `statsmodels`.
 The physics-guided hybrid model needs `torch` (CPU is enough). The satellite tutorial needs `pystac-client` and `rasterio` and an internet connection.
-The foundation-model tutorial needs `rasterio` and downloads about 60 MB of prepared data on Colab; no Earth Engine account is required.
+The two foundation-model tutorials need `rasterio` and download about 60 MB (Notebook 12) and 40 MB (Notebook 13) of prepared data on Colab; no Earth Engine account or GPU is required.
 
 ## Data
 
@@ -61,9 +62,15 @@ The foundation-model tutorial needs `rasterio` and downloads about 60 MB of prep
 | `sample_data/alphaearth/site_month_data.csv` | Monthly tower ET (uncorrected and energy-balance corrected), GPP, meteorology, plus Daymet, Landsat 8/9 NDVI and MODIS NDVI/EVI/LAI/fPAR at each tower | AmeriFlux FLUXNET, Daymet V4, USGS Landsat, MODIS |
 | `sample_data/alphaearth/region/` | 40 km x 40 km rasters around Vaira Ranch (UTM 10N): AlphaEarth embeddings 2021 and 2023 at 100 m, year-to-year similarity, Landsat NDVI, OpenET ensemble ET, MOD16 ET, MOD17 GPP, Daymet, MODIS vegetation and land cover, elevation | see `region/README.md` |
 | `sample_data/alphaearth/prep_alphaearth_data.py` | The Earth Engine script that produced the files above (needs an Earth Engine credential and the FLUXNET zips) | This repository |
+| `sample_data/alphaearth/prithvi_site_month_pca64.csv` | Monthly Prithvi-EO-2.0 embeddings (PCA-64 of the 1024-D encoder tokens, 960 m footprint) per tower-month, with the fraction of cloud-free HLS pixels | HLS L30/S30 v2 via Earth Engine, Prithvi-EO-2.0-300M (IBM/NASA, Apache 2.0) |
+| `sample_data/alphaearth/prithvi_site_seasonal_pca64.csv` | One four-frame (Jan/Apr/Jul/Oct) Prithvi embedding per tower-year | as above |
+| `sample_data/alphaearth/prithvi_pca.npz` | PCA means and components (1024 to 64) used for both | This repository |
+| `sample_data/alphaearth/region/prithvi_monthly_{2021,2023}_480m.tif` | Monthly Prithvi PCA-64 embeddings on the 480 m patch grid over the Vaira region | as above |
+| `sample_data/alphaearth/prep_prithvi_hls.py`, `prithvi_embed.py` | HLS chip download and Prithvi inference scripts | This repository |
 
 Daymet citation: Thornton et al. (2022), Daymet: Daily Surface Weather Data on a 1-km Grid for North America, Version 4 R1, ORNL DAAC.
 AlphaEarth citation: Brown, C. F., et al. (2025), AlphaEarth Foundations: An embedding field model for accurate and efficient global mapping from sparse label data, arXiv:2507.22291; dataset `GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL`, Google and Google DeepMind, CC-BY 4.0.
+Prithvi citation: Szwarcman, D., et al. (2024), Prithvi-EO-2.0: A versatile multi-temporal foundation model for Earth observation applications, arXiv:2412.02732; weights `ibm-nasa-geospatial/Prithvi-EO-2.0-300M`, Apache 2.0. HLS: Claverie et al. (2018), NASA LP DAAC.
 OpenET citation: Melton, F. S., et al. (2022), OpenET: Filling a critical data gap in water management for the western United States, JAWRA 58, 971-994. AmeriFlux FLUXNET data are shared under CC-BY 4.0; see each site's data policy for attribution.
 USGS data are provisional and subject to revision.
 
