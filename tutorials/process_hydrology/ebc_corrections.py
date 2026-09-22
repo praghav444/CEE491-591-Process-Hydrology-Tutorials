@@ -213,12 +213,14 @@ def aec_correction(df, min_good=AEC_MIN_GOOD):
     with np.errstate(invalid="ignore"):
         fcor = np.sqrt(f_leh * f_rng)
     fcor = np.where(np.isfinite(fcor), np.maximum(fcor, 1.0), np.nan)
-    # low-energy threshold: smallest Rn - G above which the cumulative tail shows a significant positive correlation
-    order = np.argsort(exog); thr = 0.0
-    for i in range(3, len(order) + 1):
-        r, pval = pearsonr(exog[order[:i]], endog[order[:i]])
+    # low-energy threshold (as in the reference package): sort the days with a finite factor by Rn - G, compute the
+    # Pearson correlation of H + LE with Rn - G over the cumulative low-energy tail, and take the first day at which
+    # the days below it are significantly positively correlated; no correction is applied at or below it
+    fin = np.isfinite(fcor); order = np.argsort(exog[fin]); ex, en = exog[fin][order], endog[fin][order]; thr = 0.0
+    for i in range(3, len(ex)):
+        r, pval = pearsonr(ex[:i], en[:i])
         if np.isfinite(r) and r > 0 and pval < AEC_P_MAX:
-            thr = max(float(exog[order[i - 1]]), 0.0); break
+            thr = max(float(ex[i]), 0.0); break
     fcor = np.where(exog > thr, fcor, 1.0)
     cf = pd.Series(fcor, index=daily.index)
     cf_hh = dates.map(cf).values.astype(float)
