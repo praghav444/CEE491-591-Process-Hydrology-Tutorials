@@ -10,6 +10,7 @@ Required columns (W m-2 unless noted)
     DateTime  : timestamps (start of interval)
     LE, H     : latent and sensible heat flux
     NETRAD, G : net radiation and ground heat flux
+    LE_measured_flag, H_measured_flag : 1 where the flux was measured rather than gap-filled (optional)  [AEC]
     TA        : air temperature (deg C)          [FLARE]
     VPD       : vapor pressure deficit (kPa)      [PULSE, FLARE]
     PA        : air pressure (kPa)                [FLARE]
@@ -19,15 +20,19 @@ Required columns (W m-2 unless noted)
 Methods
     bowen_ratio_correction : Twine et al. (2000); H and LE scaled so H + LE = Rn - G, half hour by half hour
     ofc_correction         : ONEFlux EBC_CF moving-window correction (Pastorello et al., 2020), reproduced from ecbcf.c
+    aec_correction         : available-energy correction (Zhang et al., 2024): a daily factor that depends on Rn - G,
+                             read from the local slope of daily H + LE against Rn - G; H and LE scaled equally
     mdebr_correction       : storage-adjusted modified daytime energy-balance ratio (after Mauder et al., 2013)
     pulse_correction       : potential underlying water-use efficiency constraint (Raghav & Kumar, 2026)
     flare_correction       : surface flux equilibrium (thermodynamic Bowen ratio) constraint (Raghav & Kumar, 2026, in review)
 
-The AEC method (Zhang et al., 2024) needs its authors' package and is not reproduced here.
+The AEC implementation follows the authors' reference package (aec_correction, W. Zhang) step by step, in plain
+numpy/pandas/scipy/statsmodels so that no extra install is needed.
 """
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
+from scipy.stats import pearsonr
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
 # --------------------------------------------------------------------------- shared settings
@@ -129,6 +134,98 @@ def ofc_correction(df):
     out["CF_OFC"] = cf_s
     out["LE_OFC"] = out["LE"].values * cf_s
     out["H_OFC"] = out["H"].values * cf_s
+    return out
+
+
+# --------------------------------------------------------------------------- 2b. AEC (Zhang et al. 2024)
+AEC_MIN_GOOD = 0.5          # a day is used when at least this fraction of its intervals is measured (not gap-filled)
+AEC_LOWESS_FRAC = 2 / 3     # LOWESS span for the daily H+LE vs Rn-G relation
+AEC_PTS_PER_BIN = 60        # about this many days per slope bin
+AEC_TAIL_N = 21             # points used to extrapolate the factor curve beyond the outermost bins
+AEC_P_MAX = 0.1             # significance level for the low-energy threshold
+
+
+def _aec_factor_curve(exog, endog, error_in="LeH"):
+    """Correction factor as a function of daily available energy (Zhang et al., 2024).
+
+    Daily H + LE (`endog`) is smoothed against daily Rn - G (`exog`) with LOWESS; the smoothed relation is cut into
+    quantile bins of about 60 days and the slope d(H+LE)/d(Rn-G) is fitted in each bin. The inverse slope is the
+    factor by which the turbulent fluxes must be scaled for the relation to have slope 1. It is interpolated to every
+    day's Rn - G and extrapolated linearly in the tails. `error_in="RnG"` repeats the construction with the roles
+    swapped (the error is assumed to sit in Rn - G); the two are combined by the caller."""
+    m = np.isfinite(exog) & np.isfinite(endog)
+    if error_in == "LeH":
+        sm = lowess(endog[m], exog[m], frac=AEC_LOWESS_FRAC, return_sorted=True); x, y = sm[:, 0], sm[:, 1]
+    else:
+        sm = lowess(exog[m], endog[m], frac=AEC_LOWESS_FRAC, return_sorted=True); x, y = sm[:, 1], sm[:, 0]
+    n_bins = max(int(m.sum()) // AEC_PTS_PER_BIN, 3)
+    q = np.quantile(x, np.linspace(0, 1, n_bins))
+    bx, bf = [], []
+    for j in range(n_bins - 1):
+        a = int(np.argmin(np.abs(x - q[j]))); b = int(np.argmin(np.abs(x - q[j + 1])))
+        if b <= a + 1:
+            continue
+        slope = np.polyfit(x[a:b], y[a:b], 1)[0]
+        if slope > 0:                                   # a non-positive slope has no meaningful inverse
+            bx.append(x[a] + (x[b] - x[a]) / 2); bf.append(1.0 / slope)
+    bx, bf = np.asarray(bx, float), np.asarray(bf, float)
+    f = np.full_like(exog, np.nan, dtype=float)
+    if len(bx) < 2:
+        return f
+    order = np.argsort(bx); bx, bf = bx[order], bf[order]
+    inside = np.isfinite(exog) & (exog >= bx[0]) & (exog <= bx[-1])
+    f[inside] = np.interp(exog[inside], bx, bf)
+    srt = np.argsort(exog); xs, fs = exog[srt], f[srt]; ok = np.isfinite(xs) & np.isfinite(fs)
+    lo = np.isfinite(exog) & (exog < bx[0]); hi = np.isfinite(exog) & (exog > bx[-1])
+    if lo.any() and ok.sum() >= 2:
+        f[lo] = np.polyval(np.polyfit(xs[ok][:AEC_TAIL_N], fs[ok][:AEC_TAIL_N], 1), exog[lo])
+    if hi.any() and ok.sum() >= 2:
+        f[hi] = np.polyval(np.polyfit(xs[ok][-AEC_TAIL_N:], fs[ok][-AEC_TAIL_N:], 1), exog[hi])
+    return f
+
+
+def aec_correction(df, min_good=AEC_MIN_GOOD):
+    """Available-energy correction (Zhang et al., 2024), applied as one factor per day to H and LE.
+
+    Steps: (1) daily means of LE, H, Rn, G from measured (not gap-filled) intervals, keeping days with at least
+    `min_good` of their intervals measured; (2) a factor curve assuming the error is in H + LE and another assuming
+    it is in Rn - G, combined as their geometric mean and floored at 1 (fluxes are never reduced); (3) below the daily
+    available energy at which H + LE stops being significantly positively correlated with Rn - G (Pearson r > 0,
+    p < 0.1 over the cumulative low-energy tail), no correction is applied; (4) each day's factor multiplies all of
+    that day's half-hourly H and LE. Adds CF_AEC, LE_AEC, H_AEC; days without a factor keep the original fluxes."""
+    out = df.copy()
+    t = pd.DatetimeIndex(out["DateTime"]); dates = t.normalize()
+    good = np.isfinite(out[["LE", "H", "NETRAD", "G"]].values).all(axis=1)
+    for flag in ("LE_measured_flag", "H_measured_flag"):
+        if flag in out:
+            good &= out[flag].fillna(0).values.astype(bool)
+    n_all = pd.Series(1, index=dates).groupby(level=0).sum()
+    d = out.loc[good, ["LE", "H", "NETRAD", "G"]].copy(); d["date"] = dates[good]
+    daily = d.groupby("date")[["LE", "H", "NETRAD", "G"]].mean()
+    frac = d.groupby("date").size() / n_all.reindex(daily.index)
+    daily = daily[frac >= min_good]
+    out["CF_AEC"] = np.nan
+    if len(daily) < 10:
+        out["LE_AEC"], out["H_AEC"] = out["LE"], out["H"]
+        return out
+    exog = (daily["NETRAD"] - daily["G"].fillna(0)).values; endog = (daily["LE"] + daily["H"]).values
+    f_leh = _aec_factor_curve(exog, endog, "LeH"); f_rng = _aec_factor_curve(exog, endog, "RnG")
+    with np.errstate(invalid="ignore"):
+        fcor = np.sqrt(f_leh * f_rng)
+    fcor = np.where(np.isfinite(fcor), np.maximum(fcor, 1.0), np.nan)
+    # low-energy threshold: smallest Rn - G above which the cumulative tail shows a significant positive correlation
+    order = np.argsort(exog); thr = 0.0
+    for i in range(3, len(order) + 1):
+        r, pval = pearsonr(exog[order[:i]], endog[order[:i]])
+        if np.isfinite(r) and r > 0 and pval < AEC_P_MAX:
+            thr = max(float(exog[order[i - 1]]), 0.0); break
+    fcor = np.where(exog > thr, fcor, 1.0)
+    cf = pd.Series(fcor, index=daily.index)
+    cf_hh = dates.map(cf).values.astype(float)
+    out["CF_AEC"] = cf_hh; out["AEC_AE_threshold"] = thr
+    use = np.isfinite(cf_hh)
+    out["LE_AEC"] = np.where(use, out["LE"] * cf_hh, out["LE"])
+    out["H_AEC"] = np.where(use, out["H"] * cf_hh, out["H"])
     return out
 
 
@@ -285,13 +382,14 @@ def flare_correction(df):
 def apply_all(df):
     out = bowen_ratio_correction(df)
     out = ofc_correction(out)
+    out = aec_correction(out)
     out = mdebr_correction(out)
     out = pulse_correction(out)
     out = flare_correction(out)
     return out
 
 
-def daily_et_mm(df, cols=("LE", "LE_BR", "LE_OFC", "LE_MDEBR", "LE_PULSE", "LE_FLARE"), min_completeness=0.75):
+def daily_et_mm(df, cols=("LE", "LE_BR", "LE_OFC", "LE_AEC", "LE_MDEBR", "LE_PULSE", "LE_FLARE"), min_completeness=0.75):
     """Daily ET (mm/day) from half-hourly W m-2, requiring at least `min_completeness` of the day."""
     d = df.copy(); t = pd.DatetimeIndex(d["DateTime"]); d["date"] = t.normalize()
     step_min = int(round(pd.Series(t).diff().median().total_seconds() / 60)); expected = int(round(1440 / step_min))
